@@ -19,9 +19,9 @@ package com.rackspacecloud.blueflood.io;
 import com.rackspacecloud.blueflood.outputs.handlers.KafkaProducer;
 import com.rackspacecloud.blueflood.types.IMetric;
 import com.rackspacecloud.blueflood.types.Metric;
-import com.rackspacecloud.blueflood.types.MetricsCollection;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Collection;
 
 public class KafkaMetricsWriter implements IMetricsWriter {
@@ -37,13 +37,11 @@ public class KafkaMetricsWriter implements IMetricsWriter {
 
     @Override
     public void insertFullMetrics(Collection<Metric> metrics) throws IOException {
-        MetricsCollection m = new MetricsCollection();
-        m.addImpl(metrics);
-        kafka.pushFullResBatch(m);
+        kafka.pushFullResBatch(new ArrayList<IMetric>(metrics));
     }
 
     @Override
     public void insertPreaggreatedMetrics(Collection<IMetric> metrics) throws IOException {
-        throw new IOException("Not yet implemented");
+        kafka.pushPreaggregatedBatch(metrics);
     }
 }

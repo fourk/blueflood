@@ -16,8 +16,8 @@
 
 package com.rackspacecloud.blueflood.outputs.handlers;
 
+import com.rackspacecloud.blueflood.types.IMetric;
 import com.rackspacecloud.blueflood.service.KafkaProducerConfig;
-import com.rackspacecloud.blueflood.types.MetricsCollection;
 import kafka.javaapi.producer.Producer;
 import kafka.producer.KeyedMessage;
 import kafka.producer.ProducerConfig;
@@ -25,10 +25,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.util.*;
 
 public class KafkaProducer {
     private static final KafkaProducer instance = new KafkaProducer();
-    private Producer<String, MetricsCollection> producer = null;
+    private Producer<String, IMetric> producer = null;
     private static final Logger log = LoggerFactory.getLogger(KafkaProducer.class);
 
     private KafkaProducer() {
@@ -53,13 +54,25 @@ public class KafkaProducer {
     private synchronized void createProducer() throws IOException {
         ProducerConfig config = new ProducerConfig(KafkaProducerConfig.asKafkaProperties());
 
-        producer = new Producer<String, MetricsCollection>(config);
+        producer = new Producer<String, IMetric>(config);
     }
 
-    public void pushFullResBatch(MetricsCollection batch) throws IOException {
-        KeyedMessage<String, MetricsCollection> data = new KeyedMessage<String, MetricsCollection>("metrics_full", batch);
+    public void pushFullResBatch(Collection<IMetric> batch) throws IOException {
+        pushBatchToTopic(batch, "metrics_full");
+    }
+
+    public void pushPreaggregatedBatch(Collection<IMetric> batch) throws IOException {
+        pushBatchToTopic(batch, "metrics_preaggregated");
+    }
+
+    private void pushBatchToTopic(Collection<IMetric> batch, String topic) throws IOException {
+        List<KeyedMessage<String, IMetric>> ls = new ArrayList<KeyedMessage<String, IMetric>>();
+        for (IMetric iMetric : batch) {
+            ls.add(new KeyedMessage<String, IMetric>(topic, iMetric));
+        }
+
         try {
-            producer.send(data);
+            producer.send(ls);
         } catch (Exception e) {
             log.error("Problem encountered while pushing data to kafka.", e);
             throw new IOException(e);
