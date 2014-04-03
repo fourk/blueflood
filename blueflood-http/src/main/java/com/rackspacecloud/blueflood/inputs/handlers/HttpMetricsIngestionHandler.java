@@ -17,12 +17,12 @@
 package com.rackspacecloud.blueflood.inputs.handlers;
 
 import com.codahale.metrics.Timer;
+import com.google.common.util.concurrent.ListenableFuture;
 import com.rackspacecloud.blueflood.concurrent.AsyncChain;
 import com.rackspacecloud.blueflood.http.HttpRequestHandler;
 import com.rackspacecloud.blueflood.http.HttpResponder;
 import com.rackspacecloud.blueflood.inputs.formats.JSONMetricsContainer;
 import com.rackspacecloud.blueflood.io.Constants;
-import com.rackspacecloud.blueflood.service.Configuration;
 import com.rackspacecloud.blueflood.types.IMetric;
 import com.rackspacecloud.blueflood.types.Metric;
 import com.rackspacecloud.blueflood.types.MetricsCollection;
@@ -40,27 +40,35 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.TimeoutException;
 
 public class HttpMetricsIngestionHandler implements HttpRequestHandler {
     private static final Logger log = LoggerFactory.getLogger(HttpMetricsIngestionHandler.class);
 
-    private final ObjectMapper mapper;
-    private final TypeFactory typeFactory;
-    private final AsyncChain<MetricsCollection, Boolean> processorChain;
+    protected final ObjectMapper mapper;
+    protected final TypeFactory typeFactory;
+    private final AsyncChain<MetricsCollection, List<Boolean>> processorChain;
     private final TimeValue timeout;
 
     // Metrics
     private static final Timer handlerTimer = Metrics.timer(HttpMetricsIngestionHandler.class, "HTTP metrics ingestion timer");
-    private static final HashSet<String> AUTHORIZED_AGENT_TENANTS = new HashSet<String>(Configuration.getInstance().getListProperty("AUTHORIZED_AGENT_TENANTS"));
 
-    public HttpMetricsIngestionHandler(AsyncChain<MetricsCollection, Boolean> processorChain, TimeValue timeout) {
+    public HttpMetricsIngestionHandler(AsyncChain<MetricsCollection, List<Boolean>> processorChain, TimeValue timeout) {
         this.mapper = new ObjectMapper();
         this.typeFactory = TypeFactory.defaultInstance();
         this.timeout = timeout;
         this.processorChain = processorChain;
+    }
+
+    protected JSONMetricsContainer createContainer(String body, String tenantId) throws JsonParseException, JsonMappingException, IOException {
+        List<JSONMetricsContainer.JSONMetric> jsonMetrics =
+                mapper.readValue(
+                        body,
+                        typeFactory.constructCollectionType(List.class,
+                                JSONMetricsContainer.JSONMetric.class)
+                );
+        return new JSONMetricsContainer(tenantId, jsonMetrics);
     }
 
     @Override
@@ -71,19 +79,10 @@ public class HttpMetricsIngestionHandler implements HttpRequestHandler {
         final Timer.Context timerContext = handlerTimer.time();
         final String body = request.getContent().toString(Constants.DEFAULT_CHARSET);
         try {
-            Class JSONMetricFormatClass;
-            if (AUTHORIZED_AGENT_TENANTS.contains(tenantId) && request.getHeader("X-MultiTenant") != null) {
-                JSONMetricFormatClass = JSONMetricsContainer.ScopedJSONMetric.class;
-            } else {
-                JSONMetricFormatClass = JSONMetricsContainer.JSONMetric.class;
+            jsonMetricsContainer = createContainer(body, tenantId);
+            if (!jsonMetricsContainer.isValid()) {
+                throw new IOException("Invalid JSONMetricsContainer");
             }
-            List<JSONMetricsContainer.JSONMetric> jsonMetrics =
-                    mapper.readValue(
-                            body,
-                            typeFactory.constructCollectionType(List.class,
-                                    JSONMetricFormatClass)
-                    );
-            jsonMetricsContainer = new JSONMetricsContainer(tenantId, jsonMetrics);
         } catch (JsonParseException e) {
             log.warn("Exception parsing content", e);
             sendResponse(ctx, request, "Cannot parse content", HttpResponseStatus.BAD_REQUEST);
@@ -117,7 +116,14 @@ public class HttpMetricsIngestionHandler implements HttpRequestHandler {
         collection.add(new ArrayList<IMetric>(containerMetrics));
 
         try {
-            processorChain.apply(collection).get(timeout.getValue(), timeout.getUnit());
+            ListenableFuture<List<Boolean>> futures = processorChain.apply(collection);
+            List<Boolean> persisteds = futures.get(timeout.getValue(), timeout.getUnit());
+            for (Boolean persisted : persisteds) {
+                if (!persisted) {
+                    sendResponse(ctx, request, null, HttpResponseStatus.INTERNAL_SERVER_ERROR);
+                    return;
+                }
+            }
             sendResponse(ctx, request, null, HttpResponseStatus.OK);
         } catch (TimeoutException e) {
             sendResponse(ctx, request, "Timed out persisting metrics", HttpResponseStatus.ACCEPTED);
